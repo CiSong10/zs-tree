@@ -291,7 +291,7 @@ def process_tiles(
 
             if sem_tile.sum() == 0:
                 continue
-            del r, g, b, tile_pil, segformer_tile
+            del r, g, b, tile_pil
 
             # Stage 2 — instance segmentation
             inst_mask = run_cellpose(tile_np, sem_tile, ksize, diameter, cellprob_threshold)
@@ -323,7 +323,7 @@ def process_tiles(
 if __name__ == "__main__":
     tif_path = "/home/cisong/detectree2-implementation/data/massillon/rgb/Massillon.tif"
     mask_path = "/home/cisong/detectree2-implementation/data/massillon/mask/MassillonCanopyMask.tif"
-    output_gdb = "massillon_test.gdb"
+    output_gdb = "output/massillon_test.gdb"
 
     ksize              = 3
     diameter           = 250
