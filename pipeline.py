@@ -224,6 +224,7 @@ def process_tiles(
     diameter: int = 250,
     cellprob_threshold: float = -3.0,
     resume: bool = False,
+    output_semantic: str | Path | None = None,
 ) -> gpd.GeoDataFrame:
     """
     For each tile:
@@ -249,16 +250,19 @@ def process_tiles(
 
     out_dir = Path("tiled_crowns")
     out_dir.mkdir(exist_ok=True)
+    if not resume and any(out_dir.iterdir()):
+        for f in out_dir.iterdir():
+            f.unlink()
+
+    if output_semantic is not None:
+        semantic = np.zeros((H, W), dtype=np.uint8)
 
     # Open the mask file once for the entire run, or use a no-op context
     mask_ctx = rasterio.open(mask_path) if mask_path else nullcontext()
 
     with rasterio.open(tif_path) as src, mask_ctx as mask_src:
-        for (ti, row0), (tj, col0) in tqdm(
-            list(product(enumerate(row_starts), enumerate(col_starts))),
-            desc="Processing tiles"
-        ):
-            tile_gpkg = out_dir / f"tile_{ti:03d}_{tj:03d}.gpkg"
+        for row0, col0 in tqdm(list(product(row_starts, col_starts))):
+            tile_gpkg = out_dir / f"tile_{row0}_{col0}.gpkg"
             if resume and tile_gpkg.exists():
                 continue
             
@@ -273,6 +277,10 @@ def process_tiles(
             g = to_uint8(src.read(2, window=window))
             b = to_uint8(src.read(3, window=window))
             tile_np = np.stack([r, g, b], axis=-1)
+
+            if tile_np.max() == 0:
+                continue
+
             tile_pil = Image.fromarray(tile_np)
 
             # Stage 1 — semantic segmentation
@@ -291,7 +299,9 @@ def process_tiles(
 
             if sem_tile.sum() == 0:
                 continue
-            del r, g, b, tile_pil
+            
+            if output_semantic is not None:
+                semantic[row0:row1, col0:col1] |= sem_tile
 
             # Stage 2 — instance segmentation
             inst_mask = run_cellpose(tile_np, sem_tile, ksize, diameter, cellprob_threshold)
@@ -314,6 +324,25 @@ def process_tiles(
 
             gc.collect()
 
+    if output_semantic is not None and semantic is not None:
+        output_semantic = Path(output_semantic)
+        output_semantic.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(
+            output_semantic,
+            "w",
+            driver="GTiff",
+            height=H,
+            width=W,
+            count=1,
+            dtype=np.uint8,
+            crs=crs,
+            transform=transform,
+            compress="lzw",
+            nodata=255,
+        ) as dst:
+            dst.write(semantic, 1)
+        print(f"Semantic mosaic written → {output_semantic}")
+
     crowns = _merge_tile_files(out_dir, crs)
     crowns["geometry"] = crowns["geometry"].apply(fill_holes)
     crowns["geometry"] = crowns["geometry"].simplify(0.3)
@@ -321,13 +350,14 @@ def process_tiles(
 
 
 if __name__ == "__main__":
-    tif_path = "/home/cisong/detectree2-implementation/data/massillon/rgb/Massillon.tif"
-    mask_path = "/home/cisong/detectree2-implementation/data/massillon/mask/MassillonCanopyMask.tif"
-    output_gdb = "output/massillon_test.gdb"
+    tif_path = "imagery/WildRice_2023_naip_Norman_clipped.tif"
+    mask_path = ""
+    mask_path = None
+    output_gdb = "/mnt/c/users/cs0330/Documents/ArcGIS/Projects/WildRice/wildrice_trees.gdb"
 
     ksize              = 3
-    diameter           = 250
-    cellprob_threshold = 0.4
+    diameter           = 120 # 250 --> 120 due to the 30 cm resolution
+    cellprob_threshold = 0
 
     tree_crowns = process_tiles(
         tif_path,
@@ -340,6 +370,6 @@ if __name__ == "__main__":
     clean.to_file(
         output_gdb,
         driver="OpenFileGDB",
-        layer=f"test_{ksize}_{diameter}_{cellprob_threshold}",
+        layer=f"Norman_zs_{ksize}_{diameter}_{cellprob_threshold}",
         layer_options={"TARGET_ARCGIS_VERSION": "ARCGIS_PRO_3_2_OR_LATER"},
     )
