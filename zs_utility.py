@@ -1,6 +1,7 @@
 
 import rasterio
 import geopandas as gpd
+import numpy as np
 from shapely.geometry import Polygon, MultiPolygon
 from collections import defaultdict, deque
 from tqdm import tqdm
@@ -47,11 +48,13 @@ def clean_crowns(
     iou_threshold=0.5,
     area_threshold=2,
     containment_threshold=0.5,
+    verbose=True
 ):
     crowns = crowns[~crowns.is_empty & crowns.is_valid].copy()
     crowns = crowns[crowns.area > area_threshold].copy()
 
-    print("[clean_crowns] Performing spatial join...")
+    if verbose:
+        print("[clean_crowns] Performing spatial join...")
     join = gpd.sjoin(crowns, crowns, how="inner", predicate="intersects")
     join = join[join.index != join["index_right"]]
 
@@ -62,6 +65,7 @@ def clean_crowns(
         join.iterrows(),
         total=len(join),
         desc="[clean_crowns] Building conflict graph",
+        disable=not verbose
     ):
         i = row.name
         j = row["index_right"]
@@ -117,8 +121,139 @@ def clean_crowns(
         keep.add(best)
 
     crowns_clean = crowns.loc[sorted(keep)].reset_index(drop=True)
-    print(
-        f"[clean_crowns] {len(crowns)} → {len(crowns_clean)} crowns "
-        f"(removed {len(crowns) - len(crowns_clean)})"
-    )
+    if verbose:
+        print(
+            f"[clean_crowns] {len(crowns)} → {len(crowns_clean)} crowns "
+            f"(removed {len(crowns) - len(crowns_clean)})"
+        )
     return crowns_clean
+
+
+def calculate_circularity(geometry):
+    """
+    Calculate the circularity (roundness) of a polygon.
+    
+    Circularity = 4 * pi * Area / Perimeter^2
+    
+    - Value ranges from 0 to 1
+    - 1.0 = perfect circle
+    - Lower values = more elongated / irregular shapes
+    """
+    if geometry is None or geometry.is_empty:
+        return 0.0
+    
+    area = geometry.area
+    perimeter = geometry.length
+    
+    if perimeter == 0:
+        return 0.0
+    
+    circularity = (4 * np.pi * area) / (perimeter ** 2)
+    return circularity
+
+
+def calculate_elongation(geometry):
+    """
+    Alternative metric: elongation ratio from the minimum rotated bounding box.
+    
+    Elongation = min_side / max_side
+    
+    - Value ranges from 0 to 1
+    - 1.0 = square bounding box (compact shape)
+    - Lower values = more elongated (long thin shapes)
+    """
+    if geometry is None or geometry.is_empty:
+        return 0.0
+    
+    bbox = geometry.minimum_rotated_rectangle
+    coords = list(bbox.exterior.coords)
+    
+    # Calculate side lengths of the bounding box
+    sides = []
+    for i in range(len(coords) - 1):
+        dx = coords[i+1][0] - coords[i][0]
+        dy = coords[i+1][1] - coords[i][1]
+        sides.append(np.sqrt(dx**2 + dy**2))
+    
+    if not sides or max(sides) == 0:
+        return 0.0
+    
+    return min(sides) / max(sides)
+
+
+def filter_by_shape(
+    gdf: gpd.GeoDataFrame,
+    circularity_threshold: float = 0.4,
+    elongation_threshold: float = 0.3,
+    use_both: bool = False,
+) -> gpd.GeoDataFrame:
+    """
+    Filter a GeoDataFrame to keep only sufficiently circular/compact polygons.
+
+    Args:
+        gdf: Input GeoDataFrame with polygon geometries.
+        circularity_threshold: Minimum circularity score (0–1). Polygons below
+            this value are removed. Default 0.4 works well for tree crowns.
+        elongation_threshold: Minimum elongation ratio (0–1). Filters long thin
+            shapes. Default 0.3.
+        use_both: If True, a polygon must pass BOTH thresholds to be kept.
+            If False (default), passing EITHER threshold is sufficient.
+
+    Returns:
+        Filtered GeoDataFrame with added 'circularity' and 'elongation' columns.
+    """
+    gdf = gdf.copy()
+    
+    # Calculate metrics
+    gdf["circularity"] = gdf.geometry.apply(calculate_circularity)
+    gdf["elongation"] = gdf.geometry.apply(calculate_elongation)
+
+    # Build filter masks
+    circ_mask = gdf["circularity"] >= circularity_threshold
+    elon_mask = gdf["elongation"] >= elongation_threshold
+    
+    if use_both:
+        mask = circ_mask & elon_mask
+    else:
+        mask = circ_mask | elon_mask
+    
+    filtered = gdf[mask].reset_index(drop=True)
+    
+    # Summary
+    # removed = len(gdf) - len(filtered)
+    # print(f"Original polygons : {len(gdf)}")
+    # print(f"Kept              : {len(filtered)}")
+    # print(f"Removed           : {removed} ({removed / len(gdf) * 100:.1f}%)")
+    # print(f"\nCircularity stats (before filtering):")
+    # print(gdf["circularity"].describe().round(3))
+    # print(f"\nElongation stats (before filtering):")
+    # print(gdf["elongation"].describe().round(3))
+    
+    return filtered
+
+
+if __name__ == "__main__":
+    output_gdb = "output/wildrice_zs_test.gdb"
+    # Load your GeoDataFrame
+    gdf = gpd.read_file(output_gdb, layer="test_3_125__2")
+
+    filtered_gdf = filter_by_shape(
+        gdf,
+        circularity_threshold=0.4,
+        elongation_threshold=0.35,
+        use_both=True,
+    )
+
+    # # Inspect the scores to help tune your threshold
+    # gdf["circularity"] = gdf.geometry.apply(calculate_circularity)
+    # gdf["elongation"] = gdf.geometry.apply(calculate_elongation)
+    # print(gdf[["circularity", "elongation"]].sort_values("circularity").head(20))
+
+    # Save result
+    filtered_gdf.to_file("filtered_trees.gpkg", driver="GPKG")
+    filtered_gdf.to_file(
+    output_gdb,
+    driver="OpenFileGDB",
+    layer=f"test_cir",
+    layer_options={"TARGET_ARCGIS_VERSION": "ARCGIS_PRO_3_2_OR_LATER"},
+)
