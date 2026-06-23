@@ -26,18 +26,13 @@ from shapely.geometry import box, shape
 from tqdm import tqdm
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
  
-from zs_utility import clean_crowns, fill_holes
-
+from zs_utility import clean_crowns, fill_holes, filter_by_shape, _merge_tile_files
 
 warnings.filterwarnings("ignore", category=UserWarning, module="cellpose")
 torch.sparse.check_sparse_tensor_invariants.disable()
 
 # --------------- CONFIGURATION --------------------
 SEMANTIC_REPO      = "restor/tcd-segformer-mit-b5"
-TREE_CLASS_ID      = 1          # 0 = background, 1 = tree
-TILE_SIZE          = 2048       # pixels per tile — reduce (e.g. 512) if OOM
-OVERLAP            = 256        # pixel overlap between adjacent tiles
-BATCH_DTYPE        = torch.float16  # fp16 halves SegFormer VRAM usage
 
 device         = "cuda" if torch.cuda.is_available() else "cpu"
 processor      = SegformerImageProcessor.from_pretrained(SEMANTIC_REPO)
@@ -134,21 +129,22 @@ def read_mask_for_window(
 def get_semantic_mask(image_pil: Image.Image) -> np.ndarray:
     """
     Run SegFormer and return a binary tree mask (uint8, 0/1) at input resolution.
+    Note: fp16 halves SegFormer VRAM usage
     """
     inputs = processor(images=image_pil, return_tensors="pt")
     inputs = {
-        k: v.to(device, dtype=BATCH_DTYPE if v.is_floating_point() else v.dtype)
+        k: v.to(device, dtype=torch.float16 if v.is_floating_point() else v.dtype)
         for k, v in inputs.items()
     }
 
-    with torch.no_grad(), torch.autocast(device_type=device, dtype=BATCH_DTYPE):
+    with torch.no_grad(), torch.autocast(device_type=device, dtype=torch.float16):
         outputs = semantic_model(**inputs)
 
     logits    = outputs.logits.float()  # back to fp32 for interpolation    
     upsampled = torch.nn.functional.interpolate(
         logits, size=image_pil.size[::-1], mode="bilinear", align_corners=False
     )
-    mask = (upsampled.argmax(dim=1)[0] == TREE_CLASS_ID).cpu().numpy().astype(np.uint8)
+    mask = (upsampled.argmax(dim=1)[0] == 1).cpu().numpy().astype(np.uint8)
     torch.cuda.empty_cache()
     return mask
 
@@ -165,7 +161,8 @@ def run_cellpose(
     
     Parameters
     -------
-    diameter: approximate average crown diameter (pixels)
+    diameter: approximate average crown diameter (pixels). 
+      Default: 250 was used for OAM-TCD 10 cm resolution benchmark data
     cellprob_threshold: Default -3.0 to force segmentation inside mask
 
     Returns
@@ -204,29 +201,23 @@ def instance_mask_to_gdf(instance_mask: np.ndarray, transform, crs) -> gpd.GeoDa
     return gpd.GeoDataFrame(records, crs=crs)
 
 
-def _merge_tile_files(out_dir: Path, crs) -> gpd.GeoDataFrame:
-    """Concatenate all per-tile GeoPackages into one GeoDataFrame."""
-    tile_files = sorted(out_dir.glob("tile_*.gpkg"))
-    if not tile_files:
-        raise RuntimeError(f"No tile GeoPackages found in {out_dir}.")
-    return gpd.GeoDataFrame(
-        pd.concat([gpd.read_file(f) for f in tile_files], ignore_index=True),
-        crs=crs,
-    )
- 
-
 def process_tiles(
     tif_path: str,
-    tile_size: int = TILE_SIZE,
-    overlap: int = OVERLAP,
+    tile_size: int = 2048,
+    overlap: int = 256,
     mask_path: str | None = None,
     ksize: int = 3,
     diameter: int = 250,
     cellprob_threshold: float = -3.0,
     resume: bool = False,
     output_semantic: str | Path | None = None,
+    skip_semantic: bool = False,
+    verbose: bool = True
 ) -> gpd.GeoDataFrame:
     """
+    skip_semantic: if a semantic mask is already made before. 
+        load it in mask_path. output_semantic will be ignored
+
     For each tile:
       1. Read the RGB window.
       2. Run SegFormer for a semantic tree mask, optionally intersected with
@@ -243,26 +234,46 @@ def process_tiles(
     stride = tile_size - overlap  
     row_starts = list(range(0, H, stride))
     col_starts = list(range(0, W, stride))
-    print(
-        f"Image size: {W}×{H}px  |  "
-        f"Tiles: {len(col_starts)}×{len(row_starts)} = {len(row_starts) * len(col_starts)}"
-    )
+    if verbose:
+        print(
+            f"Image size: {W}×{H}px  |  "
+            f"Tiles: {len(col_starts)}×{len(row_starts)} = {len(row_starts) * len(col_starts)}"
+        )
 
-    out_dir = Path("tiled_crowns")
-    out_dir.mkdir(exist_ok=True)
-    if not resume and any(out_dir.iterdir()):
-        for f in out_dir.iterdir():
+    tiles_dir = Path("tiled_crowns")
+    tiles_dir.mkdir(exist_ok=True)
+    if not resume and any(tiles_dir.iterdir()):
+        for f in tiles_dir.iterdir():
             f.unlink()
 
-    if output_semantic is not None:
+    if output_semantic:
         semantic = np.zeros((H, W), dtype=np.uint8)
 
     # Open the mask file once for the entire run, or use a no-op context
     mask_ctx = rasterio.open(mask_path) if mask_path else nullcontext()
 
-    with rasterio.open(tif_path) as src, mask_ctx as mask_src:
-        for row0, col0 in tqdm(list(product(row_starts, col_starts))):
-            tile_gpkg = out_dir / f"tile_{row0}_{col0}.gpkg"
+    if output_semantic and not skip_semantic:
+        output_semantic = Path(output_semantic)
+        output_semantic.parent.mkdir(parents=True, exist_ok=True)
+        sem_ctx = rasterio.open(
+            output_semantic,
+            "w",
+            driver="GTiff",
+            height=H,
+            width=W,
+            count=1,
+            dtype=np.uint8,
+            crs=crs,
+            transform=transform,
+            compress="lzw",
+            nodata=255,
+        )
+    else:
+        sem_ctx = nullcontext()
+
+    with rasterio.open(tif_path) as src, mask_ctx as mask_src, sem_ctx as sem_dst:
+        for row0, col0 in tqdm(list(product(row_starts, col_starts)), smoothing=0.1, disable=not verbose):
+            tile_gpkg = tiles_dir / f"tile_{row0}_{col0}.gpkg"
             if resume and tile_gpkg.exists():
                 continue
             
@@ -284,24 +295,28 @@ def process_tiles(
             tile_pil = Image.fromarray(tile_np)
 
             # Stage 1 — semantic segmentation
-            segformer_mask = get_semantic_mask(tile_pil)
+            if not skip_semantic:
+                segformer_mask = get_semantic_mask(tile_pil)
 
-            if mask_src is not None:
-                precomp_tile = read_mask_for_window(
-                    mask_src, transform, crs, row0, col0, th, tw
-                )
-                # Strict intersection: pixel is "tree" only when both masks agree
-                sem_tile = (
-                    (precomp_tile == TREE_CLASS_ID) & (segformer_mask == 1)
-                ).astype(np.uint8)
-            else:
-                sem_tile = segformer_mask
+                if mask_src is not None:
+                    precomp_tile = read_mask_for_window(
+                        mask_src, transform, crs, row0, col0, th, tw
+                    )
+                    # Intersection rules
+                    sem_tile = (
+                        (precomp_tile == 1) | (segformer_mask == 1)
+                    ).astype(np.uint8)
+                else:
+                    sem_tile = segformer_mask
+
+                if sem_dst is not None:
+                    sem_dst.write(sem_tile, 1, window=window)
+
+            elif skip_semantic:
+                sem_tile = read_mask_for_window(mask_src, transform, crs, row0, col0, th, tw)
 
             if sem_tile.sum() == 0:
                 continue
-            
-            if output_semantic is not None:
-                semantic[row0:row1, col0:col1] |= sem_tile
 
             # Stage 2 — instance segmentation
             inst_mask = run_cellpose(tile_np, sem_tile, ksize, diameter, cellprob_threshold)
@@ -324,40 +339,24 @@ def process_tiles(
 
             gc.collect()
 
-    if output_semantic is not None and semantic is not None:
-        output_semantic = Path(output_semantic)
-        output_semantic.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(
-            output_semantic,
-            "w",
-            driver="GTiff",
-            height=H,
-            width=W,
-            count=1,
-            dtype=np.uint8,
-            crs=crs,
-            transform=transform,
-            compress="lzw",
-            nodata=255,
-        ) as dst:
-            dst.write(semantic, 1)
-        print(f"Semantic mosaic written → {output_semantic}")
+        if output_semantic and not skip_semantic:
+            print(f"Semantic mosaic written → {output_semantic}")
 
-    crowns = _merge_tile_files(out_dir, crs)
+    crowns = _merge_tile_files(tiles_dir, crs)
     crowns["geometry"] = crowns["geometry"].apply(fill_holes)
     crowns["geometry"] = crowns["geometry"].simplify(0.3)
     return crowns
 
 
 if __name__ == "__main__":
-    tif_path = "imagery/WildRice_2023_naip_Norman_clipped.tif"
-    mask_path = ""
+    tif_path = "imagery/RGBN_TestTile.tif"
     mask_path = None
-    output_gdb = "/mnt/c/users/cs0330/Documents/ArcGIS/Projects/WildRice/wildrice_trees.gdb"
+    output_gdb = "output/io_areo.gdb"
+    output_semantic = "output/IO_semantic.tif"
 
     ksize              = 3
-    diameter           = 120 # 250 --> 120 due to the 30 cm resolution
-    cellprob_threshold = 0
+    diameter           = 250 # 250 --> 125 due to the 30 cm resolution
+    cellprob_threshold = -3
 
     tree_crowns = process_tiles(
         tif_path,
@@ -365,11 +364,15 @@ if __name__ == "__main__":
         ksize=ksize,
         diameter=diameter,
         cellprob_threshold=cellprob_threshold,
+        output_semantic=output_semantic,
+        skip_semantic=True
     )
-    clean = clean_crowns(tree_crowns, area_threshold=20)
+
+    tree_crowns = filter_by_shape(tree_crowns, circularity_threshold=0.4, elongation_threshold=0.3, use_both=True)
+    clean = clean_crowns(tree_crowns, area_threshold=2)
     clean.to_file(
         output_gdb,
         driver="OpenFileGDB",
-        layer=f"Norman_zs_{ksize}_{diameter}_{cellprob_threshold}",
+        layer=f"zs_{ksize}_{diameter}_{abs(cellprob_threshold)}",
         layer_options={"TARGET_ARCGIS_VERSION": "ARCGIS_PRO_3_2_OR_LATER"},
     )

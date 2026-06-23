@@ -2,9 +2,11 @@
 import rasterio
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 from shapely.geometry import Polygon, MultiPolygon
 from collections import defaultdict, deque
 from tqdm import tqdm
+from pathlib import Path
 
 
 def fill_holes(geom):
@@ -41,6 +43,14 @@ def calc_iou(shape1, shape2):
     """Calculate the IoU of two shapes."""
     iou = shape1.intersection(shape2).area / shape1.union(shape2).area
     return iou
+
+
+def min_vertices(geom):
+    if isinstance(geom, Polygon):
+        return len(geom.exterior.coords) - 1
+    elif isinstance(geom, MultiPolygon):
+        return min(len(p.exterior.coords) - 1 for p in geom.geoms)
+    return 0
 
 
 def clean_crowns(
@@ -120,13 +130,17 @@ def clean_crowns(
         best = max(component, key=lambda idx: crowns.at[idx, "geometry"].area)
         keep.add(best)
 
-    crowns_clean = crowns.loc[sorted(keep)].reset_index(drop=True)
+    clean = crowns.loc[sorted(keep)].reset_index(drop=True)
+
+    clean = clean[clean.geometry.apply(min_vertices) >= 5]
+
     if verbose:
         print(
-            f"[clean_crowns] {len(crowns)} → {len(crowns_clean)} crowns "
-            f"(removed {len(crowns) - len(crowns_clean)})"
+            f"[clean_crowns] {len(crowns)} → {len(clean)} crowns "
+            f"(removed {len(crowns) - len(clean)})"
         )
-    return crowns_clean
+
+    return clean
 
 
 def calculate_circularity(geometry):
@@ -257,3 +271,14 @@ if __name__ == "__main__":
     layer=f"test_cir",
     layer_options={"TARGET_ARCGIS_VERSION": "ARCGIS_PRO_3_2_OR_LATER"},
 )
+
+
+def _merge_tile_files(tiles_dir: Path, crs) -> gpd.GeoDataFrame:
+    """Concatenate all per-tile GeoPackages into one GeoDataFrame."""
+    tile_files = sorted(tiles_dir.glob("*.gpkg"))
+    if not tile_files:
+        raise RuntimeError(f"No tile GeoPackages found in {tiles_dir}.")
+    return gpd.GeoDataFrame(
+        pd.concat([gpd.read_file(f) for f in tile_files], ignore_index=True),
+        crs=crs,
+    )
