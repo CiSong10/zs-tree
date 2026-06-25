@@ -203,20 +203,18 @@ def instance_mask_to_gdf(instance_mask: np.ndarray, transform, crs) -> gpd.GeoDa
 
 def process_tiles(
     tif_path: str,
-    tile_size: int = 2048,
-    overlap: int = 256,
     mask_path: str | None = None,
-    ksize: int = 3,
     diameter: int = 250,
     cellprob_threshold: float = -3.0,
+    ksize: int = 3,
+    tile_size: int = 2048,
+    overlap: int = 128,
     resume: bool = False,
     output_semantic: str | Path | None = None,
-    skip_semantic: bool = False,
-    verbose: bool = True
+    verbose: bool = False
 ) -> gpd.GeoDataFrame:
     """
-    skip_semantic: if a semantic mask is already made before. 
-        load it in mask_path. output_semantic will be ignored
+    Run the two-stage segmentation pipeline over a tiled GeoTIFF.
 
     For each tile:
       1. Read the RGB window.
@@ -225,6 +223,9 @@ def process_tiles(
       3. Run CellposeModel for instance segmentation.
       4. Vectorise and write a per-tile GeoPackage.
     """
+    run_segformer = output_semantic is not None
+    if not run_segformer and mask_path is None:
+        raise ValueError("Provide either mask_path (precomputed) or output_semantic (run SegFormer).")
 
     with rasterio.open(tif_path) as src:
         H, W = src.height, src.width
@@ -236,23 +237,19 @@ def process_tiles(
     col_starts = list(range(0, W, stride))
     if verbose:
         print(
-            f"Image size: {W}×{H}px  |  "
+            f"Image: {W}×{H}px  |  "
             f"Tiles: {len(col_starts)}×{len(row_starts)} = {len(row_starts) * len(col_starts)}"
         )
 
     tiles_dir = Path("tiled_crowns")
     tiles_dir.mkdir(exist_ok=True)
-    if not resume and any(tiles_dir.iterdir()):
+    if not resume:
         for f in tiles_dir.iterdir():
             f.unlink()
 
-    if output_semantic:
-        semantic = np.zeros((H, W), dtype=np.uint8)
-
-    # Open the mask file once for the entire run, or use a no-op context
     mask_ctx = rasterio.open(mask_path) if mask_path else nullcontext()
 
-    if output_semantic and not skip_semantic:
+    if output_semantic:
         output_semantic = Path(output_semantic)
         output_semantic.parent.mkdir(parents=True, exist_ok=True)
         sem_ctx = rasterio.open(
@@ -292,27 +289,19 @@ def process_tiles(
             if tile_np.max() == 0:
                 continue
 
-            tile_pil = Image.fromarray(tile_np)
-
             # Stage 1 — semantic segmentation
-            if not skip_semantic:
+            if run_segformer:
+                tile_pil = Image.fromarray(tile_np)
                 segformer_mask = get_semantic_mask(tile_pil)
 
-                if mask_src is not None:
-                    precomp_tile = read_mask_for_window(
-                        mask_src, transform, crs, row0, col0, th, tw
-                    )
-                    # Intersection rules
-                    sem_tile = (
-                        (precomp_tile == 1) | (segformer_mask == 1)
-                    ).astype(np.uint8)
+                if isinstance(mask_src, rasterio.DatasetReader):
+                    precomp_tile = read_mask_for_window(mask_src, transform, crs, row0, col0, th, tw)
+                    sem_tile = ((precomp_tile == 1) | (segformer_mask == 1)).astype(np.uint8)
                 else:
                     sem_tile = segformer_mask
-
                 if sem_dst is not None:
                     sem_dst.write(sem_tile, 1, window=window)
-
-            elif skip_semantic:
+            else:
                 sem_tile = read_mask_for_window(mask_src, transform, crs, row0, col0, th, tw)
 
             if sem_tile.sum() == 0:
@@ -320,10 +309,9 @@ def process_tiles(
 
             # Stage 2 — instance segmentation
             inst_mask = run_cellpose(tile_np, sem_tile, ksize, diameter, cellprob_threshold)
-            
             if inst_mask.max() == 0:
                 continue
-            
+
             crowns_tile = instance_mask_to_gdf(inst_mask, tile_transform, crs)
 
             # Discard crowns that touch the tile edge
@@ -339,7 +327,7 @@ def process_tiles(
 
             gc.collect()
 
-        if output_semantic and not skip_semantic:
+        if run_segformer and output_semantic and verbose:
             print(f"Semantic mosaic written → {output_semantic}")
 
     crowns = _merge_tile_files(tiles_dir, crs)

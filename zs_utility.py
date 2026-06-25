@@ -199,7 +199,7 @@ def filter_by_shape(
     gdf: gpd.GeoDataFrame,
     circularity_threshold: float = 0.4,
     elongation_threshold: float = 0.3,
-    use_both: bool = False,
+    use_both: bool = True,
 ) -> gpd.GeoDataFrame:
     """
     Filter a GeoDataFrame to keep only sufficiently circular/compact polygons.
@@ -232,16 +232,6 @@ def filter_by_shape(
         mask = circ_mask | elon_mask
     
     filtered = gdf[mask].reset_index(drop=True)
-    
-    # Summary
-    # removed = len(gdf) - len(filtered)
-    # print(f"Original polygons : {len(gdf)}")
-    # print(f"Kept              : {len(filtered)}")
-    # print(f"Removed           : {removed} ({removed / len(gdf) * 100:.1f}%)")
-    # print(f"\nCircularity stats (before filtering):")
-    # print(gdf["circularity"].describe().round(3))
-    # print(f"\nElongation stats (before filtering):")
-    # print(gdf["elongation"].describe().round(3))
     
     return filtered
 

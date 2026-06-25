@@ -3,23 +3,6 @@ import geopandas as gpd
 from shapely.geometry import box
 
 
-def main():
-    pred_file =  "zs_f_tree_crowns.gpkg"
-    gt_file = "uniontown_train_nm_4.gpkg"
-
-    pred = gpd.read_file(pred_file)
-    gt = gpd.read_file(gt_file)
-
-    minx, miny, maxx, maxy = gt.total_bounds
-    bbox_geom = box(minx, miny, maxx, maxy)
-    pred_clip = pred[pred.geometry.within(bbox_geom)]
-
-    metrics = evaluate_tree_crowns(pred_clip, gt, iou_threshold=0.5)
-
-    for k, v in metrics.items():
-        print(f"{k}: {v}")
-
-
 def compute_iou(geom_a, geom_b) -> float:
     intersection_area = geom_a.intersection(geom_b).area
     if intersection_area == 0:
@@ -146,6 +129,9 @@ def evaluate_tree_crowns(pred, gt, iou_threshold=0.5):
         else 0
     )
 
+    iou_scores = match_result["iou_scores"]
+    mean_iou = round(sum(iou_scores) / len(iou_scores), 2) if iou_scores else 0.0
+
     return {
         "True Positives": tp,
         "False Positives": fp,
@@ -153,8 +139,22 @@ def evaluate_tree_crowns(pred, gt, iou_threshold=0.5):
         "Precision": round(precision, 2),
         "Recall": round(recall, 2),
         "F1": round(f1, 2),
+        "mIoU": mean_iou,
     }
 
 
 if __name__ == "__main__":
-    main()
+    pred_file =  "zs_f_tree_crowns.gpkg"
+    gt_file = "uniontown_train_nm_4.gpkg"
+
+    pred = gpd.read_file(pred_file)
+    gt = gpd.read_file(gt_file)
+
+    minx, miny, maxx, maxy = gt.total_bounds
+    bbox_geom = box(minx, miny, maxx, maxy)
+    pred_clip = pred[pred.geometry.within(bbox_geom)]
+
+    metrics = evaluate_tree_crowns(pred_clip, gt, iou_threshold=0.5)
+
+    for k, v in metrics.items():
+        print(f"{k}: {v}")

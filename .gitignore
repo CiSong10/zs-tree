@@ -2,5 +2,6 @@ imagery/
 tiled_crowns/
 chunk_crowns/
 output/
+__pycache__/
 
 main.py
