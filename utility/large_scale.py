@@ -10,7 +10,7 @@ import rasterio
 from tqdm import tqdm
 
 from pipeline import _merge_tile_files
-from zs_utility import clean_crowns, fill_holes, filter_by_shape
+from utility.zs_utility import clean_crowns, fill_holes, filter_by_shape
 
 
 tiles_dir = Path("tiled_crowns")

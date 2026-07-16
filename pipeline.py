@@ -26,7 +26,7 @@ from shapely.geometry import box, shape
 from tqdm import tqdm
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
  
-from zs_utility import clean_crowns, fill_holes, filter_by_shape, _merge_tile_files
+from utility.zs_utility import clean_crowns, fill_holes, filter_by_shape, _merge_tile_files
 
 warnings.filterwarnings("ignore", category=UserWarning, module="cellpose")
 torch.sparse.check_sparse_tensor_invariants.disable()
@@ -264,6 +264,7 @@ def process_tiles(
             transform=transform,
             compress="lzw",
             nodata=255,
+            nbit=1
         )
     else:
         sem_ctx = nullcontext()
@@ -337,9 +338,9 @@ def process_tiles(
 
 
 if __name__ == "__main__":
-    tif_path = "imagery/RGBN_TestTile.tif"
-    mask_path = None
-    output_gdb = "output/io_areo.gdb"
+    tif_path        = "imagery/RGBN_TestTile.tif"
+    mask_path       = None
+    output_gdb      = "output/io_areo.gdb"
     output_semantic = "output/IO_semantic.tif"
 
     ksize              = 3
