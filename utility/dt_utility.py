@@ -75,7 +75,7 @@ def post_clean(
 
         # Re-clean the combined set to resolve any mutual overlaps among newly added crowns
         current_clean = clean_crowns(
-            result_df, iou_threshold=iou_threshold, field=field, verbose=verbose
+            result_df, iou_threshold=iou_threshold, field=field, verbose=verbose, confidence=0
         )
         current_clean.reset_index(drop=True, inplace=True)
 

@@ -154,6 +154,7 @@ def run_cellpose(
     semantic_mask: np.ndarray,
     ksize: int = 3,
     diameter: int = 250,
+    flow_threshold: float = 1,
     cellprob_threshold: float = -3.0,
 ) -> np.ndarray:
     """
@@ -176,7 +177,7 @@ def run_cellpose(
     masks, _, _ = cp_model.eval(
         blurred_img,
         diameter=diameter,
-        flow_threshold=1,
+        flow_threshold=flow_threshold,
         cellprob_threshold=cellprob_threshold, 
         progress=True
     )
@@ -205,6 +206,7 @@ def process_tiles(
     tif_path: str,
     mask_path: str | None = None,
     diameter: int = 250,
+    flow_threshold: float = 1.0,
     cellprob_threshold: float = -3.0,
     ksize: int = 3,
     tile_size: int = 2048,
@@ -309,7 +311,7 @@ def process_tiles(
                 continue
 
             # Stage 2 — instance segmentation
-            inst_mask = run_cellpose(tile_np, sem_tile, ksize, diameter, cellprob_threshold)
+            inst_mask = run_cellpose(tile_np, sem_tile, ksize, diameter, flow_threshold, cellprob_threshold)
             if inst_mask.max() == 0:
                 continue
 

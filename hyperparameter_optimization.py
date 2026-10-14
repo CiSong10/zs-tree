@@ -6,31 +6,31 @@ from optuna.samplers import TPESampler
 
 from utility.zs_utility import clean_crowns, filter_by_shape
 from pipeline import process_tiles
-from cross_model.evaluate_iou import evaluate_tree_crowns
+from utility.evaluate_iou import evaluate_tree_crowns
 
 # ======= Configs ========
+# Search bounds
+DIAMETER_LOW,  DIAMETER_HIGH  = 50, 250  # integers
+THRESHOLD_LOW, THRESHOLD_HIGH = -4.0, 1.0  # floats
+CELL_LOW, CELL_HIGH = -25, -9  # int
 
-area = "test"
+# Optuna settings
+N_TRIALS    = 50  
+IOU_THRESH  = 0.5  # matching threshold passed to evaluate_tree_crowns
+
+# DATA
+
+area        = "Pittsburgh"
 data_dir    = Path(f"/home/cisong/detectree2-implementation/data/{area}/")
-# data_dir    = Path("imagery")
-tif_path    = data_dir / "ms" / f"{area}.tif"
-mask_path   = data_dir / "mask" / f"{area}_CanopyMask.tif"
-
-mask_path   = None
-output_semantic = data_dir / "mask" / f"{area}_CanopyMask1.tif"
+# tif_path    = data_dir / "ms" / f"{area}.tif"
+tif_path    = "/mnt/c/Users/cs0330/Documents/ArcGIS/Projects/PA/Pittsburgh.tif"
+mask_path   = data_dir / "mask" / f"tree_mask.tif"
 
 gt_path     = data_dir / "crowns" / f"Coshocton_test.gpkg"
 gt_layer    = f"Coshocton_test_polygons"
+
 output_gdb  = Path("output") / f"{area}_zs_ho.gdb"
 results_csv = Path("output") / "optuna_results.csv"
-
-# Search bounds
-DIAMETER_LOW,  DIAMETER_HIGH  = 50, 250   # integers
-THRESHOLD_LOW, THRESHOLD_HIGH = -4.0, 1.0  # floats
-
-# Optuna settings
-N_TRIALS    = 50   # increase for a finer search; 40 is a good starting point
-IOU_THRESH  = 0.5  # matching threshold passed to evaluate_tree_crowns
 
 gt_crowns = gpd.read_file(gt_path, layer=gt_layer)
 
@@ -71,19 +71,18 @@ def objective(trial: optuna.Trial) -> float:
 
 
 def main():
+    area = "Pittsburgh"
     # ======= Run study ======================================================
-
-    sampler = TPESampler(seed=42)   # seed for reproducibility
+    sampler = TPESampler()   # seed for reproducibility
     study = optuna.create_study(sampler=sampler, direction="minimize", study_name=f"{area}_zs_tree")
-    
+
     # Warm-start: a few hand-picked trials so TPE has something to learn from
     # before it starts proposing. Remove if you want a fully blind search.
     study.enqueue_trial({"diameter": 80, "cellprob_threshold": 0, "ksize": 1})
     study.enqueue_trial({"diameter": 100, "cellprob_threshold": -1.0, "ksize": 3})
     study.enqueue_trial({"diameter": 150, "cellprob_threshold": -3.0, "ksize": 3})
-    
-    study.optimize(objective, n_trials=N_TRIALS)
 
+    study.optimize(objective, n_trials=N_TRIALS)
 
     # ======= Results ========================================================
     
@@ -97,8 +96,8 @@ def main():
     print(f" Precision          : {best.user_attrs['Precision']:.2f}")
     print(f" Recall             : {best.user_attrs['Recall']:.2f}")
     print(f" GDB layer          : {best.user_attrs['layer_name']}")
-    
-    # Save full results table to CSV for plotting / auditing
+
+    # Save full results table to CSV
     records = []
     for t in study.trials:
         records.append({

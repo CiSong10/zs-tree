@@ -19,12 +19,12 @@ def largest_polygon(geom):
 
 # ------ Config -------
 
-area_list = ["Greenport"]
+area_list = ["Pittsburgh"]
 
 for area in area_list:
     print(area)
         
-    output_gdb = Path(f"output/Columbia_tree_segmentation.gdb")
+    output_gdb = Path(f"output/{area}_tree_segmentation.gdb")
 
     zs_confidence = 0.9
     iou_threshold = 0.4
@@ -32,7 +32,7 @@ for area in area_list:
     area_threshold = 20 
     containment_threshold = 0.5
 
-    crowns_zs = gpd.read_file(f"output/Columbia_zs.gdb", layer=f"zs_{area}_d140_t1")
+    crowns_zs = gpd.read_file(f"output/{area}_zs.gdb") # , layer=f"zs_{area}_d140_t1")
     crowns_dt = gpd.read_file(f"/home/cisong/detectree2-implementation/data/{area}/{area}_prediction.gdb", layer=f"{area}_flexi")
     # --------------------
 

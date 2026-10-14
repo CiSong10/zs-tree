@@ -17,9 +17,9 @@ def largest_polygon(geom):
 
 # ------ Config -------
 
-area = "Greenport"
+area = "Pittsburgh"
 
-output_gdb = Path(f"output/Columbia_tree_segmentation.gdb")
+output_gdb = Path(f"output/{area}_tree_segmentation.gdb")
 
 # --------------------
 
